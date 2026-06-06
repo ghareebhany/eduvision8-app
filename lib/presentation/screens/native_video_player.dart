@@ -265,6 +265,13 @@ class _YoutubeNativePlayerState extends State<_YoutubeNativePlayer> {
     _wvc = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
+      // ✅ User-Agent مطابق لـ Chrome على Android
+      // YouTube يرفض WebView الافتراضي (يظهر فيه "wv") بخطأ 150/153
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 10; K) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/124.0.0.0 Mobile Safari/537.36',
+      )
       ..setNavigationDelegate(NavigationDelegate(
         onPageFinished: (_) {
           // بعد تحميل الصفحة نبدأ مزامنة الوقت عبر JS
