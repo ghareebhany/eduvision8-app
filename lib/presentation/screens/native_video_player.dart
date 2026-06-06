@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../../domain/entities/lesson.dart';
 import '../providers/di_providers.dart';
@@ -261,47 +262,39 @@ class _YoutubeNativePlayerState extends State<_YoutubeNativePlayer> {
     _initWebView();
   }
 
-  void _initWebView() {
+  void _initWebView() async {
     _wvc = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
-      // ✅ User-Agent مطابق لـ Chrome على Android
-      // YouTube يرفض WebView الافتراضي (يظهر فيه "wv") بخطأ 150/153
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 10; K) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36',
-      )
       ..setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (_) {
-          // بعد تحميل الصفحة نبدأ مزامنة الوقت عبر JS
-          _startSyncTimer();
-        },
+        onPageFinished: (_) => _startSyncTimer(),
       ))
-      // channel لاستقبال أحداث المشغّل من JS
       ..addJavaScriptChannel(
         'PlayerBridge',
         onMessageReceived: (msg) => _onBridgeMessage(msg.message),
-      )
-      ..loadHtmlString(_buildPlayerHtml(widget.videoId));
+      );
+
+    // ✅ تمكين autoplay بدون user gesture على Android
+    final platform = _wvc.platform;
+    if (platform is AndroidWebViewController) {
+      await platform.setMediaPlaybackRequiresUserGesture(false);
+    }
+
+    // ✅ baseUrl = eduvision3.com يُعطي الصفحة origin حقيقي
+    // YouTube IFrame API تتحقق من origin وتسمح بالتشغيل
+    await _wvc.loadHtmlString(
+      _buildPlayerHtml(widget.videoId),
+      baseUrl: _siteOrigin,
+    );
   }
 
   // ── يبني HTML بنفس iframe params التي يستخدمها Plyr ──
   // ✅ youtube-nocookie.com = لا قيود تضمين، لا تحقق من origin
   // هذا بالضبط ما يفعله Plyr عند noCookie:true
+  // ✅ الطريقة الصحيحة لـ YouTube IFrame API:
+  //    div فارغ → API تبني الـ iframe بنفسها → لا تعارض
+  //    baseUrl في loadHtmlString يُعطي origin حقيقي
   String _buildPlayerHtml(String videoId) {
-    final iframeSrc = 'https://www.youtube-nocookie.com/embed/$videoId'
-        '?autoplay=1'
-        '&controls=0'
-        '&disablekb=1'
-        '&playsinline=1'
-        '&rel=0'
-        '&showinfo=0'
-        '&iv_load_policy=3'
-        '&modestbranding=1'
-        '&enablejsapi=1';
-        // ❌ حُذف origin — youtube-nocookie لا يحتاجه ولا يرفض بدونه
-
     return '''<!DOCTYPE html>
 <html>
 <head>
@@ -309,55 +302,60 @@ class _YoutubeNativePlayerState extends State<_YoutubeNativePlayer> {
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:100%; height:100%; background:#000; overflow:hidden; }
-iframe { width:100%; height:100%; border:0; display:block; }
+#player { width:100%; height:100%; }
 </style>
 </head>
 <body>
-<iframe id="yt"
-  src="$iframeSrc"
-  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-  allowfullscreen>
-</iframe>
+<div id="player"></div>
 <script>
-// YouTube IFrame API — نفس الطريقة التي يستخدمها Plyr
 var tag = document.createElement('script');
 tag.src = 'https://www.youtube.com/iframe_api';
 document.head.appendChild(tag);
 
 var player;
 function onYouTubeIframeAPIReady() {
-  player = new YT.Player('yt', {
+  player = new YT.Player('player', {
+    videoId: '$videoId',
+    playerVars: {
+      autoplay:       1,
+      controls:       0,
+      disablekb:      1,
+      playsinline:    1,
+      rel:            0,
+      showinfo:       0,
+      iv_load_policy: 3,
+      modestbranding: 1,
+      origin:         '$_siteOrigin'
+    },
     events: {
       onReady:       onPlayerReady,
       onStateChange: onPlayerStateChange,
+      onError:       onPlayerError,
     }
   });
 }
 
 function onPlayerReady(e) {
-  var dur = player.getDuration();
   PlayerBridge.postMessage(JSON.stringify({
-    type: 'ready', duration: dur
+    type:'ready', duration: player.getDuration()
   }));
 }
 
 function onPlayerStateChange(e) {
-  // YT.PlayerState: ENDED=0, PLAYING=1, PAUSED=2, BUFFERING=3
-  if (e.data === 0) {
-    PlayerBridge.postMessage(JSON.stringify({ type: 'ended' }));
-  } else if (e.data === 1) {
-    PlayerBridge.postMessage(JSON.stringify({ type: 'playing' }));
-  } else if (e.data === 2) {
-    PlayerBridge.postMessage(JSON.stringify({ type: 'paused' }));
-  }
+  if      (e.data === 0) PlayerBridge.postMessage(JSON.stringify({type:'ended'}));
+  else if (e.data === 1) PlayerBridge.postMessage(JSON.stringify({type:'playing'}));
+  else if (e.data === 2) PlayerBridge.postMessage(JSON.stringify({type:'paused'}));
 }
 
-// دوال التحكم — تُستدعى من Dart عبر runJavaScript
-function playVideo()        { if(player) player.playVideo(); }
-function pauseVideo()       { if(player) player.pauseVideo(); }
-function seekTo(sec)        { if(player) player.seekTo(sec, true); }
-function getCurrentTime()   { return player ? player.getCurrentTime() : 0; }
-function getDuration()      { return player ? player.getDuration() : 0; }
+function onPlayerError(e) {
+  PlayerBridge.postMessage(JSON.stringify({type:'error', code:e.data}));
+}
+
+function playVideo()      { if(player) player.playVideo(); }
+function pauseVideo()     { if(player) player.pauseVideo(); }
+function seekTo(sec)      { if(player) player.seekTo(sec, true); }
+function getCurrentTime() { return player ? player.getCurrentTime() : 0; }
+function getDuration()    { return player ? player.getDuration() : 0; }
 </script>
 </body>
 </html>''';
@@ -385,6 +383,11 @@ function getDuration()      { return player ? player.getDuration() : 0; }
             _hasEnded = true;
             widget.onEnded();
           }
+        case 'error':
+          final code = (data['code'] as num?)?.toInt() ?? -1;
+          debugPrint('❌ YouTube player error code: $code');
+          // أظهر المشغّل على أي حال حتى لا تبقى شاشة التحميل
+          if (!_playerReady && mounted) setState(() => _playerReady = true);
         case 'time':
           final sec = (data['current'] as num?)?.toInt() ?? 0;
           final dur = (data['duration'] as num?)?.toInt() ?? 0;
